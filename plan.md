@@ -106,44 +106,60 @@ A clean markdown table:
 ### Johansen Test
 - Use `statsmodels.tsa.vector_ar.vecm.coint_johansen(df[['log_GLD','log_GDX']], det_order=0, k_ar_diff=1)`
 - Report trace statistic and max-eigenvalue statistic vs. critical values
-- Confirm the number of cointegrating relationships (expect: 1)
+- Confirm the number of cointegrating relationships
+
+### Actual Result & Interpretation
+**Both tests find NO cointegration over the full 2010–2024 period** (EG p=0.45, Johansen trace 10.59 vs 15.49 critical). This is an honest and economically meaningful result: GLD approximately doubled while GDX declined ~40% — a permanent structural divergence driven by the de-rating of gold mining equities. The log price ratio (Plot 4) already signalled this via its persistent upward trend.
+
+### Step 5b: Rolling Cointegration Analysis (added in response to full-period result)
+- Compute rolling Engle-Granger p-value on a **504-day (2-year) sliding window**
+- Also compute rolling OLS β over the same window to track hedge ratio instability
+- Plot both panels: p-value over time with 5% threshold shaded, and rolling β vs. static β
+- **Result:** cointegrated in 79.3% of rolling windows; β ranged from -0.10 to 1.15 — confirming the relationship existed historically but is structurally unstable
+- This directly motivates the Kalman filter: a single static β cannot capture a parameter that drifts by over 1.2 units across the sample
 
 ### Deliverable
-- Markdown summary: do both tests confirm cointegration? At what confidence level?
-- Extract and store the **static hedge ratio** `β` from Engle-Granger OLS for use in Step 6
+- Full-period test results reported honestly with economic explanation of why non-cointegration holds
+- Rolling cointegration chart showing when the relationship was and wasn't active
+- Store OLS `β` and `α` as `STATIC_BETA` / `STATIC_ALPHA` — used as baseline in Step 6
 
 ---
 
 ## Step 6: Static Spread Construction & Analysis
 
+**Purpose:** Build the static OLS spread as an explicit *baseline* that we expect to be imperfect. Its non-stationarity over the full period is the problem that the Kalman filter solves. Present it honestly rather than pretending it works.
+
 ### Spread Construction
-- `static_spread = log_GLD - β * log_GDX - α`
-- Plot spread over time
+- `static_spread = log_GLD - STATIC_BETA * log_GDX - STATIC_ALPHA`
+- Plot spread over time — expect a visible upward trend confirming non-stationarity
 
-### Z-Score
-- `z_score = (spread - spread.rolling(window).mean()) / spread.rolling(window).std()`
-- Use a 60-day rolling window initially (revisit after estimating half-life)
-- Plot z-score with ±2 and ±0.5 threshold lines overlaid
+### ADF on Static Spread
+- Run ADF on the full-period static spread — **expect non-stationary** (p > 0.05) given the full-period non-cointegration result
+- Report stat and p-value; frame this as confirming what Step 5 already showed
+- This result directly motivates moving to the dynamic approach in Step 7
 
-### ADF on Spread
-- Run ADF on the static spread — confirm stationarity
-- Report stat and p-value in a markdown cell
-
-### Half-Life Estimation
+### Half-Life Estimation (interpret with caution)
 - Fit AR(1) on spread: `Δspread_t = λ·spread_{t-1} + ε`
 - `half_life = -ln(2) / ln(1 + λ)`
-- Report half-life in trading days — this is your natural mean-reversion window
-- Use half-life as the rolling window for z-score in Step 8 (Kalman)
+- If the spread is non-stationary, λ will be close to 0 and half-life will be very long or undefined — **report this and explain what it means**
+- We will use the Kalman spread's half-life (Step 7) as the operative window for signal generation
+
+### Z-Score (for visual purposes only on static spread)
+- Plot rolling z-score with ±2 and ±0.5 thresholds
+- Note explicitly: because the underlying spread trends, z-score thresholds fire asymmetrically — another symptom of the non-stationarity problem
 
 ### ACF/PACF
 - Plot `plot_acf` and `plot_pacf` for the static spread (lags=60)
-- Caption: confirm autocorrelation structure consistent with mean-reversion
+- Caption: if autocorrelation decays slowly, this is additional evidence of non-stationarity
 
 ---
 
 ## Step 7: Kalman Filter — Dynamic Hedge Ratio
 
-This is the analytical differentiator. The static OLS hedge ratio assumes the relationship between GLD and GDX is fixed — the Kalman filter relaxes this.
+**This is now the central analytical contribution.** Step 5 proved that a static hedge ratio is structurally inadequate: β drifted from -0.10 to 1.15 across the sample. The Kalman filter is the correct solution — it estimates a time-varying β that continuously adapts to structural shifts in the GLD/GDX relationship.
+
+### Narrative framing
+The Kalman filter doesn't just "improve" the spread — it solves a specific identified problem. Make this connection explicit in the markdown: "Step 5 showed the static β is unstable; Step 7 addresses this directly."
 
 ### State Space Formulation
 - **Observation equation:** `log_GLD_t = β_t · log_GDX_t + α_t + ε_t`
@@ -158,52 +174,65 @@ This is the analytical differentiator. The static OLS hedge ratio assumes the re
 
 ### Dynamic Spread
 - `dynamic_spread = log_GLD - hedge_ratio_dynamic * log_GDX - intercept_dynamic`
+- Run ADF on the dynamic spread — **expect more stationary than static spread**
+- Estimate half-life of the dynamic spread — use this as the operative window for Step 8
 
 ### Plots
-- **Hedge ratio over time:** static (flat line) vs. dynamic (Kalman estimate) — key visualization
-- **Spread comparison:** static spread vs. dynamic spread on the same chart
-- Caption: the dynamic spread should track more tightly and show less drift, especially around structural breaks (2020, 2022)
+- **Hedge ratio over time:** static (flat line) vs. dynamic (Kalman estimate) — key visualization showing the structural drift the static model missed
+- **Spread comparison:** static spread vs. dynamic spread — dynamic should show less trend and tighter range
+- Caption: connect the hedge ratio chart to the rolling β from Step 5b — the Kalman estimate should track the rolling OLS β but with smoother, lag-free adaptation
 
 ---
 
 ## Step 8: Signal Generation
 
+**Signals are only generated during confirmed cointegration windows.** Generating signals on a non-cointegrated spread is economically incoherent — there is no mean-reversion to exploit. Use the rolling p-value from Step 5b to gate signal output.
+
 ### Z-Score on Dynamic Spread
-- Compute rolling z-score using `half_life` (from Step 6) as the window
+- Compute rolling z-score using the **Kalman spread's half-life** (from Step 7) as the window
 - Thresholds:
   - `z > +2.0` → **short spread** (GLD rich relative to GDX)
   - `z < -2.0` → **long spread** (GLD cheap relative to GDX)
   - `|z| < 0.5` → **close position**
 
+### Regime-Aware Signal Gating
+- Mask signals: set signal to 0 in any window where the rolling cointegration p-value ≥ 0.05
+- This means signals only fire when there is statistical evidence that mean-reversion is active
+- Plot the gated signal count by year — expect fewer signals in 2022–2024 when cointegration weakened
+
 ### Signal Column
-- Create a `signal` column: +1 (long), -1 (short), 0 (flat)
+- Create a `signal` column: +1 (long), -1 (short), 0 (flat/gated)
 - Track position changes to identify entry/exit dates
 
 ### Plots
-- Z-score time series with ±2.0 and ±0.5 horizontal lines
-- Entry/exit markers overlaid on the normalized price chart
-- Caption: note that we are not backtesting PnL — signals are evaluated for economic coherence, not profitability
+- Z-score time series with ±2.0 and ±0.5 horizontal lines, with non-cointegrated periods shaded grey
+- Entry/exit markers overlaid on the normalized price chart (only in active cointegration windows)
+- Caption: signals are evaluated for economic coherence, not PnL — the regime gating is the key addition vs. a naive threshold approach
 
 ---
 
 ## Step 9: Regime Analysis
 
-This is the "depth of thinking" section — explain *why* the relationship behaves differently at different times.
+**This is now the analytical centerpiece of the project.** The rolling cointegration chart from Step 5b already does the quantitative work — this section adds the economic narrative that explains *why* the relationship behaved the way it did. Graded on depth of interpretation.
 
-### Regimes to Highlight
-- **2011–2012:** Divergence — gold peaks while miners underperform (cost inflation, operational issues in mining sector)
-- **2020 (COVID crash):** Temporary breakdown — both sell off sharply but at different rates; cointegration stress
-- **2022 (rate hike cycle):** Both assets under pressure from rising real rates; spread behavior changes
-- **2023–2024:** Re-anchoring as gold makes new highs
+### The Central Story
+The full-period non-cointegration result is not a failure — it reveals that the GLD/GDX relationship is **regime-dependent**. The relationship was active and tradeable for extended periods, but structural macro forces periodically broke it down. Identifying those regimes is the interesting analytical question.
 
-### Rolling Cointegration Strength
-- Compute rolling ADF p-value on the spread using a 252-day (1-year) rolling window
-- Plot over time — periods where p-value rises above 0.05 indicate cointegration breakdown
-- Overlay as shaded regions on the price/spread chart
+### Regimes to Explain (connect to rolling p-value chart from Step 5b)
+- **2010–2012 (Active):** Gold supercycle peak — GLD and GDX moved tightly together as gold prices drove miner revenues directly. Cointegration strong. β high (miners had operating leverage to gold price).
+- **2013–2015 (Breakdown begins):** Gold crash post-2011 peak. Miners hit harder than physical gold due to high fixed costs, write-downs, and capex overhang — GDX fell ~70% from peak while GLD fell ~40%. β begins structural decline.
+- **2016–2019 (Partial recovery):** Gold stabilises; some windows re-cointegrate but relationship is weaker. Rolling β in a lower range (~0.3–0.6).
+- **2020 (COVID stress):** Both assets shocked simultaneously — initial correlation spike followed by divergence (gold rallies as safe haven, miners lag due to operational shutdowns). Brief cointegration breakdown.
+- **2022 (Rate hike cycle):** Rising real rates hit both assets but differently. GDX also absorbs equity beta and energy cost inflation. Cointegration weakest in this window.
+- **2023–2024:** Gold makes new all-time highs on central bank buying. GDX partially recovers but lags — some windows re-cointegrate.
 
-### Commentary
-- For each regime: what was the macro driver? did it affect GLD and GDX symmetrically? what happened to the spread?
-- This section should be prose-heavy with figures inline — it's graded on depth of interpretation
+### Plots for this section
+- **Reference** the rolling p-value + rolling β chart from Step 5b — do not replot
+- Add: normalized prices with shaded bands where rolling p-value ≥ 0.05 (non-cointegrated periods)
+- Add: summary table — period, cointegrated Y/N, approximate β range, macro driver
+
+### Commentary requirement
+Each regime entry must answer: (1) what was the macro driver? (2) did it affect GLD and GDX symmetrically or asymmetrically? (3) what did that mean for the spread? Write 3–5 sentences per regime.
 
 ---
 
@@ -215,12 +244,14 @@ This is the "depth of thinking" section — explain *why* the relationship behav
 |---|---|---|
 | ADF Statistic | ... | ... |
 | ADF p-value | ... | ... |
-| Half-Life (days) | ... | ... |
+| Half-Life (days) | ... (likely very long / undefined) | ... (expect shorter) |
 | Rolling Std (full) | ... | ... |
 | Spread Range | ... | ... |
 
-- The Kalman spread should show a lower ADF p-value (more stationary), shorter half-life, and tighter range
-- If you add a simple ARIMA forecast on the spread, report RMSE on a holdout period (optional but adds points)
+- The static spread is expected to be non-stationary (p > 0.05) — this is the baseline that confirms the problem
+- The Kalman spread should be more stationary (lower p-value), have a shorter half-life, and a tighter, less-drifting range
+- Frame the comparison as: "static OLS fails because it cannot track the structural shift; Kalman succeeds because it was designed for exactly this"
+- If you add a simple ARIMA forecast on the Kalman spread, report RMSE on a holdout period (optional but adds points)
 
 ---
 
@@ -245,19 +276,24 @@ Before finalizing:
 
 1. **Dataset & Motivation** — what is GLD/GDX, why is this pair interesting, what period
 2. **Methods Overview** — EDA, stationarity testing, cointegration (brief), Kalman filter (intuition only, no math)
-3. **Key Findings** — 3–4 bullet points: are they cointegrated? what is the half-life? how does the dynamic hedge ratio improve the spread? what regimes broke down?
-4. **Figures** — include at least: normalized prices, dynamic hedge ratio over time, z-score with signals
-5. **Reflection** — what would you do next? what are the limitations? (static threshold, no transaction costs, look-ahead bias in Kalman init)
+3. **Key Findings** — lead with the non-cointegration result as the interesting discovery, not a caveat:
+   - Full-period cointegration does not hold — GDX structurally de-rated relative to GLD
+   - Rolling analysis shows cointegration was active ~79% of 2-year windows — the relationship is real but regime-dependent
+   - Static hedge ratio is unstable (β range -0.10 to 1.15) — motivates dynamic estimation
+   - Kalman filter produces a more stationary spread with a shorter half-life
+   - Regime-aware signal gating produces more economically coherent entry/exit points
+4. **Figures** — include at least: normalized prices with regime shading, dynamic hedge ratio vs. static, z-score with gated signals
+5. **Reflection** — limitations: look-ahead bias in Kalman initialisation, no transaction costs, threshold not optimised, non-cointegration in recent years means the strategy may not be currently deployable
 
 ---
 
 ## Step 13: Presentation Slide
 
-**Best visualization:** Dynamic z-score with signal thresholds overlaid  
+**Best visualization:** Normalized prices with regime shading overlaid (non-cointegrated periods highlighted), or the dynamic hedge ratio showing the structural drift  
 **3 bullet takeaways:**
-- GLD and GDX are cointegrated over 2010–2024, with a mean-reversion half-life of ~X days
-- A Kalman filter hedge ratio outperforms a static OLS ratio — tighter, more stationary spread
-- Cointegration breaks down around macro stress events (2020, 2022) and recovers — regime awareness is critical for live deployment
+- GLD/GDX cointegration is regime-dependent: active in ~79% of rolling 2-year windows but absent over the full 2010–2024 period — a structural de-rating of gold mining equities is the driver
+- A static hedge ratio is inadequate: β drifted from −0.10 to 1.15 across the sample; a Kalman filter tracks this shift and produces a more stationary spread
+- Regime-aware signal gating (signals only when cointegration is confirmed) is economically more coherent than naive z-score thresholds applied unconditionally
 
 ---
 
